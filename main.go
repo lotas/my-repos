@@ -11,6 +11,8 @@ import (
 type GitCallback func(path string, d fs.DirEntry)
 
 var git string
+var totalWalked int
+var totalMatched int
 
 func init() {
 	var err error
@@ -30,22 +32,21 @@ func gitCommand(path string, args ...string) {
 		fmt.Errorf("%s Cannot process:\n%s\n", path, stdoutStderr)
 	}
 
-	fmt.Printf("%s All good:\n%s\n", path, stdoutStderr)
+	fmt.Printf("%s %s All good:\n%s\n", args[0], path, stdoutStderr)
 }
 
-func gitStatus(path string, d fs.DirEntry) {
-	gitCommand(path, "status")
-}
-
-func gitPull(path string, d fs.DirEntry) {
-	gitCommand(path, "pull")
-}
+func gitStatus(path string, d fs.DirEntry) { gitCommand(path, "status") }
+func gitPull(path string, d fs.DirEntry)   { gitCommand(path, "pull") }
+func gitFetch(path string, d fs.DirEntry)  { gitCommand(path, "fetch") }
 
 func gitLog(path string, d fs.DirEntry) {
 	gitCommand(
 		path,
 		"log",
+		"--oneline",
 		"--author", "user1@email.com",
+		"--author", "user2@email.com",
+		"--author", "user3@email.com",
 		"--since", "2023-01-01",
 	)
 }
@@ -57,7 +58,9 @@ func walk(s string, d fs.DirEntry, err error, callback GitCallback) error {
 
 	if d.IsDir() && d.Name() == ".git" {
 		callback(s, d)
+		totalMatched++
 	}
+	totalWalked++
 
 	return nil
 }
@@ -76,6 +79,10 @@ func main() {
 		switch os.Args[2] {
 		case "log":
 			callback = gitLog
+		case "pull":
+			callback = gitPull
+		case "fetch":
+			callback = gitFetch
 		case "status":
 		default:
 			callback = gitStatus
@@ -86,4 +93,5 @@ func main() {
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		return walk(path, d, err, callback)
 	})
+	fmt.Printf("Scanned folders: %d, processed: %d", totalWalked, totalMatched)
 }
