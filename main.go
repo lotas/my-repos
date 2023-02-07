@@ -82,12 +82,26 @@ func main() {
 
 	var wg sync.WaitGroup
 
+	var visitedMap map[string]bool = make(map[string]bool)
+
 	fmt.Printf("Scanning from %s\n", dir)
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
+		if !d.IsDir() {
+			return nil
+		}
+
+		baseDir := filepath.Dir(path)
+
+		// skip going into the folders that already had .git in it
+		if visitedMap[baseDir] {
+			return filepath.SkipDir
+		}
+
+		totalWalked++
 		if d.Name() == ".git" {
 			wg.Add(1)
 			go func() {
@@ -95,8 +109,11 @@ func main() {
 				callback(path, d)
 			}()
 			totalMatched++
+
+			visitedMap[baseDir] = true
+
+			return filepath.SkipDir
 		}
-		totalWalked++
 
 		return nil
 	})
