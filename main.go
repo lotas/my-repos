@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 )
 
 type GitCallback func(path string, d fs.DirEntry)
@@ -51,19 +52,7 @@ func gitLog(path string, d fs.DirEntry) {
 	)
 }
 
-func walk(s string, d fs.DirEntry, err error, callback GitCallback) error {
-	if err != nil {
-		return err
-	}
-
-	if d.IsDir() && d.Name() == ".git" {
-		callback(s, d)
-		totalMatched++
-	}
-	totalWalked++
-
-	return nil
-}
+func nop(path string, d fs.DirEntry) { fmt.Printf("NOP: %s\n", path) }
 
 func main() {
 	var dir string
@@ -83,15 +72,36 @@ func main() {
 			callback = gitPull
 		case "fetch":
 			callback = gitFetch
+		case "nop":
+			callback = nop
 		case "status":
 		default:
 			callback = gitStatus
 		}
 	}
 
+	var wg sync.WaitGroup
+
 	fmt.Printf("Scanning from %s\n", dir)
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		return walk(path, d, err, callback)
+		if err != nil {
+			return err
+		}
+
+		if d.Name() == ".git" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				callback(path, d)
+			}()
+			totalMatched++
+		}
+		totalWalked++
+
+		return nil
 	})
+
+	wg.Wait()
+
 	fmt.Printf("Scanned folders: %d, processed: %d", totalWalked, totalMatched)
 }
