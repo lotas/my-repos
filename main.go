@@ -6,10 +6,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
-type GitCallback func(path string, d fs.DirEntry)
+type GitCallback func(path string, d fs.DirEntry) (string, error)
+type AfterCallback func()
+
+type SafeSummary struct {
+	sync.RWMutex
+	summaries map[string]string
+}
+
+func (ss *SafeSummary) Add(k, v string) {
+	ss.Lock()
+	defer ss.Unlock()
+	ss.summaries[k] = v
+}
+
+var summaries = &SafeSummary{
+	summaries: map[string]string{},
+}
 
 var git string
 var totalWalked int
@@ -23,63 +40,89 @@ func init() {
 	}
 }
 
-func gitCommand(path string, args ...string) {
+func gitCommand(path string, args ...string) (string, error) {
 	fullArgs := append([]string{"--git-dir", path}, args...)
 
 	cmd := exec.Command(git, fullArgs...)
 
 	stdoutStderr, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Errorf("%s Cannot process:\n%s\n", path, stdoutStderr)
-	}
-
-	fmt.Printf("%s %s All good:\n%s\n", args[0], path, stdoutStderr)
+	return string(stdoutStderr), err
 }
 
-func gitStatus(path string, d fs.DirEntry) { gitCommand(path, "status") }
-func gitPull(path string, d fs.DirEntry)   { gitCommand(path, "pull") }
-func gitFetch(path string, d fs.DirEntry)  { gitCommand(path, "fetch") }
+func diskUsage(path string) string {
+	cmd := exec.Command("du", "-hs", path)
+	stdoutStderr, _ := cmd.CombinedOutput()
+	return string(stdoutStderr)
+}
 
-func gitLog(path string, d fs.DirEntry) {
-	gitCommand(
+func gitStatus(path string, d fs.DirEntry) (string, error) { return gitCommand(path, "status") }
+func gitPull(path string, d fs.DirEntry) (string, error)   { return gitCommand(path, "pull") }
+func gitFetch(path string, d fs.DirEntry) (string, error)  { return gitCommand(path, "fetch") }
+
+func gitLog(path string, d fs.DirEntry) (string, error) {
+	return gitCommand(
 		path,
 		"log",
 		"--oneline",
 		"--author", "user1@email.com",
-		"--author", "user2@email.com",
-		"--author", "user3@email.com",
 		"--since", "2023-01-01",
 	)
 }
 
-func nop(path string, d fs.DirEntry) { fmt.Printf("NOP: %s\n", path) }
+func gitNop(path string, d fs.DirEntry) (string, error) { return fmt.Sprintf("NOP: %s", path), nil }
 
-func main() {
-	var dir string
-	var callback GitCallback = gitStatus
+func nop() {}
 
-	if len(os.Args) > 1 {
-		dir = os.Args[1]
-	} else {
-		dir, _ = os.Getwd()
+func firstLine(s string) string {
+	return strings.Split(s, "\n")[0]
+}
+
+func gitSummary(path string, d fs.DirEntry) (string, error) {
+	baseDir := filepath.Dir(path)
+	info := ""
+
+	branch, err := gitCommand(path, "rev-parse", "--abbrev-ref", "HEAD")
+	if err == nil {
+		info += fmt.Sprintf("Branch: %s", firstLine(branch))
 	}
 
-	if len(os.Args) > 2 {
-		switch os.Args[2] {
-		case "log":
-			callback = gitLog
-		case "pull":
-			callback = gitPull
-		case "fetch":
-			callback = gitFetch
-		case "nop":
-			callback = nop
-		case "status":
-		default:
-			callback = gitStatus
-		}
+	remotes, err := gitCommand(path, "remote", "-v")
+	if err == nil {
+		info += fmt.Sprintf("\nremote: %s ", firstLine(remotes))
 	}
 
+	du := diskUsage(path)
+	info += fmt.Sprintf("\nSize: %s", strings.Split(du, "\t")[0])
+
+	summaries.Add(baseDir, info)
+
+	return "", nil
+}
+func printSummary() {
+	fmt.Println("")
+	for k, v := range summaries.summaries {
+		fmt.Printf("%s:\n%s\n\n", k, v)
+	}
+}
+
+func showHelp() {
+	fmt.Printf(`
+Usage: my-repos <path> <cmd>
+Example: my-repos ~/dev fetch
+
+cmd is one of the existing git commands:
+	log
+	pull
+	fetch
+	status
+
+Or one of the extra commands:
+	summary - show how many repos there are
+`)
+	os.Exit(0)
+}
+
+func scan(dir string, callback GitCallback) {
 	var wg sync.WaitGroup
 
 	var visitedMap map[string]bool = make(map[string]bool)
@@ -106,7 +149,10 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				callback(path, d)
+				out, err2 := callback(path, d)
+				if out != "" || err2 != nil {
+					fmt.Printf("%s: %v %s\n", baseDir, err2, out)
+				}
 			}()
 			totalMatched++
 
@@ -119,6 +165,43 @@ func main() {
 	})
 
 	wg.Wait()
+}
 
-	fmt.Printf("Scanned folders: %d, processed: %d", totalWalked, totalMatched)
+func main() {
+	var dir string
+	var callback GitCallback = gitStatus
+	var afterCallback AfterCallback = nop
+
+	if len(os.Args) > 1 {
+		dir = os.Args[1]
+	} else {
+		dir, _ = os.Getwd()
+	}
+
+	if len(os.Args) > 2 {
+		switch os.Args[2] {
+		case "log":
+			callback = gitLog
+		case "pull":
+			callback = gitPull
+		case "fetch":
+			callback = gitFetch
+		case "nop":
+			callback = gitNop
+		case "status":
+			callback = gitStatus
+		case "summary":
+			callback = gitSummary
+			afterCallback = printSummary
+		default:
+			showHelp()
+		}
+	} else {
+		showHelp()
+	}
+
+	scan(dir, callback)
+
+	fmt.Printf("Scanned folders: %d, git repos: %d\n", totalWalked, totalMatched)
+	afterCallback()
 }
